@@ -1,16 +1,35 @@
 // ============================================================
-// 5-STAGE RV32I IN-ORDER PIPELINE
-// I-TYPE ARITHMETIC INSTRUCTIONS
-//
-// Example:
-// ADDI x5, x1, 10
+// RV32I 5-STAGE IN-ORDER PIPELINE
+// LOAD WORD (LW)
 //
 // IF -> ID -> EX -> MEM -> WB
+//
+// Example:
+//     LW x5, 8(x1)
+//
+// Flow:
+//     x1 + 8
+//       |
+//      EX
+//       |
+//   EX/MEM register
+//       |
+//   memory address
+//       |
+//      MEM
+//       |
+//   loaded data
+//       |
+//   MEM/WB register
+//       |
+//      WB
+//       |
+//      x5
 // ============================================================
 
 
 // ============================================================
-// 1. INSTRUCTION FETCH
+// 1. IF STAGE
 // ============================================================
 
 module if_stage (
@@ -29,11 +48,13 @@ module if_stage (
 
     always_ff @(posedge clk or posedge rst) begin
         if (rst)
-            pc <= 32'h00000000;
+            pc <= 32'd0;
         else
             pc <= pc + 32'd4;
     end
 
+    // PC is byte address.
+    // Divide by 4 to get instruction index.
     assign instruction = instr_mem[pc[9:2]];
 
 endmodule
@@ -60,6 +81,7 @@ module if_id_reg (
             pc_out    <= 32'd0;
             instr_out <= 32'd0;
         end
+
         else begin
             pc_out    <= pc_in;
             instr_out <= instr_in;
@@ -71,7 +93,44 @@ endmodule
 
 
 // ============================================================
-// 3. ID STAGE
+// 3. REGISTER FILE
+// ============================================================
+
+module register_file (
+    input  logic        clk,
+
+    // Read ports
+    input  logic [4:0]  rs1,
+    input  logic [4:0]  rs2,
+
+    output logic [31:0] rs1_data,
+    output logic [31:0] rs2_data,
+
+    // Write port
+    input  logic        reg_write,
+    input  logic [4:0]  rd,
+    input  logic [31:0] write_data
+);
+
+    logic [31:0] regs [0:31];
+
+    // x0 is always zero
+
+    assign rs1_data = (rs1 == 5'd0) ? 32'd0 : regs[rs1];
+    assign rs2_data = (rs2 == 5'd0) ? 32'd0 : regs[rs2];
+
+    always_ff @(posedge clk) begin
+
+        if (reg_write && (rd != 5'd0))
+            regs[rd] <= write_data;
+
+    end
+
+endmodule
+
+
+// ============================================================
+// 4. ID STAGE
 // ============================================================
 
 module id_stage (
@@ -80,79 +139,58 @@ module id_stage (
     output logic [4:0]  rs1,
     output logic [4:0]  rd,
 
-    output logic [2:0]  funct3,
-
     output logic [31:0] immediate,
 
     output logic        reg_write,
+    output logic        mem_read,
+    output logic        mem_write,
     output logic        alu_src,
-    output logic [3:0]  alu_control,
-
-    output logic [31:0] rs1_data
+    output logic        mem_to_reg
 );
-
-    logic [31:0] regfile [0:31];
 
     // --------------------------------------------------------
     // Instruction fields
     // --------------------------------------------------------
 
-    assign rs1    = instr[19:15];
-    assign rd     = instr[11:7];
-    assign funct3 = instr[14:12];
+    assign rs1 = instr[19:15];
+
+    assign rd  = instr[11:7];
 
 
     // --------------------------------------------------------
-    // Register read
-    // --------------------------------------------------------
-
-    assign rs1_data = (rs1 == 5'd0) ? 32'd0 : regfile[rs1];
-
-
-    // --------------------------------------------------------
-    // Immediate generation
+    // I-type immediate
     //
-    // I-type immediate = instruction[31:20]
-    // Sign extended to 32 bits
+    // LW immediate = instruction[31:20]
     // --------------------------------------------------------
 
     assign immediate = {{20{instr[31]}}, instr[31:20]};
 
 
     // --------------------------------------------------------
-    // Control + ALU operation
+    // Control signals
     // --------------------------------------------------------
 
     always_comb begin
 
         reg_write  = 1'b0;
+        mem_read   = 1'b0;
+        mem_write  = 1'b0;
         alu_src    = 1'b0;
-        alu_control = 4'b0000;
+        mem_to_reg = 1'b0;
 
-        // I-type arithmetic opcode = 0010011
-        if (instr[6:0] == 7'b0010011) begin
+        // LW opcode = 0000011
 
-            reg_write = 1'b1;
-            alu_src   = 1'b1;
+        if (instr[6:0] == 7'b0000011) begin
 
-            case (funct3)
+            reg_write  = 1'b1;
+            mem_read   = 1'b1;
+            mem_write  = 1'b0;
 
-                3'b000:
-                    alu_control = 4'b0000;   // ADDI
+            // ALU B input = immediate
+            alu_src    = 1'b1;
 
-                3'b111:
-                    alu_control = 4'b0010;   // ANDI
-
-                3'b110:
-                    alu_control = 4'b0011;   // ORI
-
-                3'b100:
-                    alu_control = 4'b0100;   // XORI
-
-                default:
-                    alu_control = 4'b0000;
-
-            endcase
+            // WB gets memory data
+            mem_to_reg = 1'b1;
 
         end
 
@@ -162,7 +200,7 @@ endmodule
 
 
 // ============================================================
-// 4. ID / EX PIPELINE REGISTER
+// 5. ID / EX PIPELINE REGISTER
 // ============================================================
 
 module id_ex_reg (
@@ -175,8 +213,10 @@ module id_ex_reg (
     input  logic [4:0]  rd_in,
 
     input  logic        reg_write_in,
+    input  logic        mem_read_in,
+    input  logic        mem_write_in,
     input  logic        alu_src_in,
-    input  logic [3:0]  alu_control_in,
+    input  logic        mem_to_reg_in,
 
     output logic [31:0] rs1_data_out,
     output logic [31:0] immediate_out,
@@ -184,34 +224,41 @@ module id_ex_reg (
     output logic [4:0]  rd_out,
 
     output logic        reg_write_out,
+    output logic        mem_read_out,
+    output logic        mem_write_out,
     output logic        alu_src_out,
-    output logic [3:0]  alu_control_out
+    output logic        mem_to_reg_out
 );
 
     always_ff @(posedge clk or posedge rst) begin
 
         if (rst) begin
 
-            rs1_data_out    <= 32'd0;
-            immediate_out   <= 32'd0;
+            rs1_data_out  <= 32'd0;
+            immediate_out <= 32'd0;
 
-            rd_out          <= 5'd0;
+            rd_out <= 5'd0;
 
-            reg_write_out   <= 1'b0;
-            alu_src_out     <= 1'b0;
-            alu_control_out <= 4'b0000;
+            reg_write_out  <= 1'b0;
+            mem_read_out   <= 1'b0;
+            mem_write_out  <= 1'b0;
+            alu_src_out    <= 1'b0;
+            mem_to_reg_out <= 1'b0;
 
         end
+
         else begin
 
-            rs1_data_out    <= rs1_data_in;
-            immediate_out   <= immediate_in;
+            rs1_data_out  <= rs1_data_in;
+            immediate_out <= immediate_in;
 
-            rd_out          <= rd_in;
+            rd_out <= rd_in;
 
-            reg_write_out   <= reg_write_in;
-            alu_src_out     <= alu_src_in;
-            alu_control_out <= alu_control_in;
+            reg_write_out  <= reg_write_in;
+            mem_read_out   <= mem_read_in;
+            mem_write_out  <= mem_write_in;
+            alu_src_out    <= alu_src_in;
+            mem_to_reg_out <= mem_to_reg_in;
 
         end
 
@@ -221,7 +268,7 @@ endmodule
 
 
 // ============================================================
-// 5. EX STAGE
+// 6. EX STAGE
 // ============================================================
 
 module ex_stage (
@@ -229,52 +276,17 @@ module ex_stage (
     input  logic [31:0] immediate,
 
     input  logic        alu_src,
-    input  logic [3:0]  alu_control,
 
     output logic [31:0] alu_result
 );
 
-    logic [31:0] alu_b;
-
-
-    // --------------------------------------------------------
-    // ALU input B MUX
-    // --------------------------------------------------------
-
     always_comb begin
 
         if (alu_src)
-            alu_b = immediate;
+            alu_result = rs1_data + immediate;
+
         else
-            alu_b = 32'd0;
-
-    end
-
-
-    // --------------------------------------------------------
-    // ALU
-    // --------------------------------------------------------
-
-    always_comb begin
-
-        case (alu_control)
-
-            4'b0000:
-                alu_result = rs1_data + alu_b;   // ADDI
-
-            4'b0010:
-                alu_result = rs1_data & alu_b;   // ANDI
-
-            4'b0011:
-                alu_result = rs1_data | alu_b;   // ORI
-
-            4'b0100:
-                alu_result = rs1_data ^ alu_b;   // XORI
-
-            default:
-                alu_result = 32'd0;
-
-        endcase
+            alu_result = rs1_data;
 
     end
 
@@ -282,7 +294,10 @@ endmodule
 
 
 // ============================================================
-// 6. EX / MEM PIPELINE REGISTER
+// 7. EX / MEM PIPELINE REGISTER
+//
+// IMPORTANT:
+// alu_result here is the EFFECTIVE MEMORY ADDRESS for LW.
 // ============================================================
 
 module ex_mem_reg (
@@ -293,11 +308,17 @@ module ex_mem_reg (
     input  logic [4:0]  rd_in,
 
     input  logic        reg_write_in,
+    input  logic        mem_read_in,
+    input  logic        mem_write_in,
+    input  logic        mem_to_reg_in,
 
     output logic [31:0] alu_result_out,
     output logic [4:0]  rd_out,
 
-    output logic        reg_write_out
+    output logic        reg_write_out,
+    output logic        mem_read_out,
+    output logic        mem_write_out,
+    output logic        mem_to_reg_out
 );
 
     always_ff @(posedge clk or posedge rst) begin
@@ -308,14 +329,21 @@ module ex_mem_reg (
             rd_out         <= 5'd0;
 
             reg_write_out  <= 1'b0;
+            mem_read_out   <= 1'b0;
+            mem_write_out  <= 1'b0;
+            mem_to_reg_out <= 1'b0;
 
         end
+
         else begin
 
             alu_result_out <= alu_result_in;
             rd_out         <= rd_in;
 
             reg_write_out  <= reg_write_in;
+            mem_read_out   <= mem_read_in;
+            mem_write_out  <= mem_write_in;
+            mem_to_reg_out <= mem_to_reg_in;
 
         end
 
@@ -325,57 +353,107 @@ endmodule
 
 
 // ============================================================
-// 7. MEM STAGE
+// 8. DATA MEMORY
+//
+// The address comes FROM EX through EX/MEM.
 // ============================================================
 
-module mem_stage (
-    input  logic [31:0] alu_result_in,
+module data_memory (
+    input  logic        clk,
 
-    output logic [31:0] result_out
+    input  logic        mem_read,
+    input  logic        mem_write,
+
+    input  logic [31:0] address,
+
+    input  logic [31:0] write_data,
+
+    output logic [31:0] read_data
 );
 
-    // I-type arithmetic does not access data memory.
+    logic [31:0] memory [0:255];
 
-    assign result_out = alu_result_in;
+
+    // --------------------------------------------------------
+    // Read
+    // --------------------------------------------------------
+
+    always_comb begin
+
+        if (mem_read)
+            read_data = memory[address[9:2]];
+
+        else
+            read_data = 32'd0;
+
+    end
+
+
+    // --------------------------------------------------------
+    // Write
+    //
+    // Used later for SW.
+    // For LW, mem_write = 0.
+    // --------------------------------------------------------
+
+    always_ff @(posedge clk) begin
+
+        if (mem_write)
+            memory[address[9:2]] <= write_data;
+
+    end
 
 endmodule
 
 
 // ============================================================
-// 8. MEM / WB PIPELINE REGISTER
+// 9. MEM / WB PIPELINE REGISTER
 // ============================================================
 
 module mem_wb_reg (
     input  logic        clk,
     input  logic        rst,
 
-    input  logic [31:0] result_in,
+    input  logic [31:0] memory_data_in,
+    input  logic [31:0] alu_result_in,
+
     input  logic [4:0]  rd_in,
 
     input  logic        reg_write_in,
+    input  logic        mem_to_reg_in,
 
-    output logic [31:0] result_out,
+    output logic [31:0] memory_data_out,
+    output logic [31:0] alu_result_out,
+
     output logic [4:0]  rd_out,
 
-    output logic        reg_write_out
+    output logic        reg_write_out,
+    output logic        mem_to_reg_out
 );
 
     always_ff @(posedge clk or posedge rst) begin
 
         if (rst) begin
 
-            result_out    <= 32'd0;
-            rd_out        <= 5'd0;
+            memory_data_out <= 32'd0;
+            alu_result_out  <= 32'd0;
 
-            reg_write_out <= 1'b0;
+            rd_out <= 5'd0;
+
+            reg_write_out  <= 1'b0;
+            mem_to_reg_out <= 1'b0;
 
         end
+
         else begin
 
-            result_out    <= result_in;
-            rd_out        <= rd_in;
+            memory_data_out <= memory_data_in;
+            alu_result_out  <= alu_result_in;
 
-            reg_write_out <= reg_write_in;
+            rd_out <= rd_in;
+
+            reg_write_out  <= reg_write_in;
+            mem_to_reg_out <= mem_to_reg_in;
 
         end
 
@@ -385,114 +463,141 @@ endmodule
 
 
 // ============================================================
-// 9. WRITE BACK
+// 10. WB STAGE
 // ============================================================
 
 module wb_stage (
-    input  logic        clk,
+    input  logic        mem_to_reg,
 
-    input  logic        reg_write,
-    input  logic [4:0]  rd,
-    input  logic [31:0] write_data,
+    input  logic [31:0] alu_result,
+    input  logic [31:0] memory_data,
 
-    output logic [31:0] wb_data
+    output logic [31:0] write_data
 );
 
-    assign wb_data = write_data;
+    always_comb begin
+
+        if (mem_to_reg)
+            write_data = memory_data;
+
+        else
+            write_data = alu_result;
+
+    end
 
 endmodule
 
 
 // ============================================================
-// 10. TOP MODULE
+// 11. TOP MODULE
 // ============================================================
 
-module rv32_i_type_pipeline (
+module rv32_lw_pipeline (
     input logic clk,
     input logic rst
 );
 
-    // --------------------------------------------------------
+    // ========================================================
     // IF
-    // --------------------------------------------------------
+    // ========================================================
 
     logic [31:0] pc_if;
     logic [31:0] instr_if;
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // IF / ID
-    // --------------------------------------------------------
+    // ========================================================
 
     logic [31:0] pc_id;
     logic [31:0] instr_id;
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // ID
-    // --------------------------------------------------------
+    // ========================================================
 
-    logic [4:0]  rs1_id;
-    logic [4:0]  rd_id;
-
-    logic [2:0]  funct3_id;
+    logic [4:0] rs1_id;
+    logic [4:0] rd_id;
 
     logic [31:0] immediate_id;
     logic [31:0] rs1_data_id;
 
-    logic        reg_write_id;
-    logic        alu_src_id;
+    logic reg_write_id;
+    logic mem_read_id;
+    logic mem_write_id;
+    logic alu_src_id;
+    logic mem_to_reg_id;
 
-    logic [3:0]  alu_control_id;
 
-
-    // --------------------------------------------------------
+    // ========================================================
     // ID / EX
-    // --------------------------------------------------------
+    // ========================================================
 
     logic [31:0] rs1_data_ex;
     logic [31:0] immediate_ex;
 
-    logic [4:0]  rd_ex;
+    logic [4:0] rd_ex;
 
-    logic        reg_write_ex;
-    logic        alu_src_ex;
+    logic reg_write_ex;
+    logic mem_read_ex;
+    logic mem_write_ex;
+    logic alu_src_ex;
+    logic mem_to_reg_ex;
 
-    logic [3:0]  alu_control_ex;
 
-
-    // --------------------------------------------------------
+    // ========================================================
     // EX
-    // --------------------------------------------------------
+    // ========================================================
 
     logic [31:0] alu_result_ex;
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // EX / MEM
-    // --------------------------------------------------------
+    // ========================================================
 
-    logic [31:0] alu_result_mem;
-    logic [4:0]  rd_mem;
+    logic [31:0] address_mem;
+    logic [4:0] rd_mem;
 
-    logic        reg_write_mem;
+    logic reg_write_mem;
+    logic mem_read_mem;
+    logic mem_write_mem;
+    logic mem_to_reg_mem;
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // MEM
-    // --------------------------------------------------------
+    // ========================================================
 
-    logic [31:0] mem_result;
+    logic [31:0] memory_data_mem;
 
 
-    // --------------------------------------------------------
+    // ========================================================
     // MEM / WB
-    // --------------------------------------------------------
+    // ========================================================
 
-    logic [31:0] result_wb;
-    logic [4:0]  rd_wb;
+    logic [31:0] memory_data_wb;
+    logic [31:0] alu_result_wb;
 
-    logic        reg_write_wb;
+    logic [4:0] rd_wb;
+
+    logic reg_write_wb;
+    logic mem_to_reg_wb;
+
+
+    // ========================================================
+    // WB
+    // ========================================================
+
+    logic [31:0] write_data_wb;
+
+
+    // ========================================================
+    // REGISTER FILE
+    // ========================================================
+
+    logic [31:0] rs2_data_unused;
 
 
     // ========================================================
@@ -509,7 +614,7 @@ module rv32_i_type_pipeline (
 
 
     // ========================================================
-    // IF → ID
+    // IF -> ID
     // ========================================================
 
     if_id_reg IF_ID (
@@ -525,29 +630,49 @@ module rv32_i_type_pipeline (
 
 
     // ========================================================
-    // ID
+    // REGISTER FILE
+    //
+    // ID reads x1.
+    // WB writes the final result.
     // ========================================================
 
-    id_stage ID (
-        .instr        (instr_id),
+    register_file REGFILE (
+        .clk        (clk),
 
-        .rs1          (rs1_id),
-        .rd           (rd_id),
+        .rs1        (rs1_id),
+        .rs2        (5'd0),
 
-        .funct3       (funct3_id),
+        .rs1_data   (rs1_data_id),
+        .rs2_data   (rs2_data_unused),
 
-        .immediate    (immediate_id),
-
-        .reg_write    (reg_write_id),
-        .alu_src      (alu_src_id),
-        .alu_control  (alu_control_id),
-
-        .rs1_data     (rs1_data_id)
+        .reg_write  (reg_write_wb),
+        .rd         (rd_wb),
+        .write_data (write_data_wb)
     );
 
 
     // ========================================================
-    // ID → EX
+    // ID
+    // ========================================================
+
+    id_stage ID (
+        .instr       (instr_id),
+
+        .rs1         (rs1_id),
+        .rd          (rd_id),
+
+        .immediate   (immediate_id),
+
+        .reg_write   (reg_write_id),
+        .mem_read    (mem_read_id),
+        .mem_write   (mem_write_id),
+        .alu_src     (alu_src_id),
+        .mem_to_reg  (mem_to_reg_id)
+    );
+
+
+    // ========================================================
+    // ID -> EX
     // ========================================================
 
     id_ex_reg ID_EX (
@@ -560,8 +685,10 @@ module rv32_i_type_pipeline (
         .rd_in           (rd_id),
 
         .reg_write_in    (reg_write_id),
+        .mem_read_in     (mem_read_id),
+        .mem_write_in    (mem_write_id),
         .alu_src_in      (alu_src_id),
-        .alu_control_in  (alu_control_id),
+        .mem_to_reg_in   (mem_to_reg_id),
 
         .rs1_data_out    (rs1_data_ex),
         .immediate_out   (immediate_ex),
@@ -569,28 +696,42 @@ module rv32_i_type_pipeline (
         .rd_out          (rd_ex),
 
         .reg_write_out   (reg_write_ex),
+        .mem_read_out    (mem_read_ex),
+        .mem_write_out   (mem_write_ex),
         .alu_src_out     (alu_src_ex),
-        .alu_control_out (alu_control_ex)
+        .mem_to_reg_out  (mem_to_reg_ex)
     );
 
 
     // ========================================================
     // EX
+    //
+    // Calculates:
+    //
+    //     base register + offset
+    //
+    // Example:
+    //
+    //     x1 = 1000
+    //     immediate = 8
+    //
+    //     ALU result = 1008
     // ========================================================
 
     ex_stage EX (
-        .rs1_data     (rs1_data_ex),
-        .immediate    (immediate_ex),
+        .rs1_data   (rs1_data_ex),
+        .immediate  (immediate_ex),
 
-        .alu_src      (alu_src_ex),
-        .alu_control  (alu_control_ex),
+        .alu_src    (alu_src_ex),
 
-        .alu_result   (alu_result_ex)
+        .alu_result (alu_result_ex)
     );
 
 
     // ========================================================
-    // EX → MEM
+    // EX -> MEM
+    //
+    // alu_result_ex becomes the memory address.
     // ========================================================
 
     ex_mem_reg EX_MEM (
@@ -601,41 +742,65 @@ module rv32_i_type_pipeline (
         .rd_in           (rd_ex),
 
         .reg_write_in    (reg_write_ex),
+        .mem_read_in     (mem_read_ex),
+        .mem_write_in    (mem_write_ex),
+        .mem_to_reg_in   (mem_to_reg_ex),
 
-        .alu_result_out  (alu_result_mem),
+        .alu_result_out  (address_mem),
         .rd_out          (rd_mem),
 
-        .reg_write_out   (reg_write_mem)
+        .reg_write_out   (reg_write_mem),
+        .mem_read_out    (mem_read_mem),
+        .mem_write_out   (mem_write_mem),
+        .mem_to_reg_out  (mem_to_reg_mem)
     );
 
 
     // ========================================================
     // MEM
+    //
+    // IMPORTANT:
+    //
+    // address_mem comes directly from EX/MEM.
     // ========================================================
 
-    mem_stage MEM (
-        .alu_result_in (alu_result_mem),
-        .result_out    (mem_result)
+    data_memory DMEM (
+        .clk        (clk),
+
+        .mem_read  (mem_read_mem),
+        .mem_write (mem_write_mem),
+
+        .address   (address_mem),
+
+        .write_data(32'd0),
+
+        .read_data (memory_data_mem)
     );
 
 
     // ========================================================
-    // MEM → WB
+    // MEM -> WB
     // ========================================================
 
     mem_wb_reg MEM_WB (
         .clk             (clk),
         .rst             (rst),
 
-        .result_in       (mem_result),
+        .memory_data_in  (memory_data_mem),
+        .alu_result_in   (address_mem),
+
         .rd_in           (rd_mem),
 
         .reg_write_in    (reg_write_mem),
+        .mem_to_reg_in   (mem_to_reg_mem),
 
-        .result_out      (result_wb),
+        .memory_data_out (memory_data_wb),
+        .alu_result_out  (alu_result_wb),
+
         .rd_out          (rd_wb),
 
-        .reg_write_out   (reg_write_wb)
+        .reg_write_out   (reg_write_wb),
+        .mem_to_reg_out  (mem_to_reg_wb)
     );
 
 
@@ -644,13 +809,12 @@ module rv32_i_type_pipeline (
     // ========================================================
 
     wb_stage WB (
-        .clk        (clk),
+        .mem_to_reg  (mem_to_reg_wb),
 
-        .reg_write  (reg_write_wb),
-        .rd         (rd_wb),
-        .write_data (result_wb),
+        .alu_result  (alu_result_wb),
+        .memory_data (memory_data_wb),
 
-        .wb_data    (result_wb)
+        .write_data  (write_data_wb)
     );
 
 endmodule
